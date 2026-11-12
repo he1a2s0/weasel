@@ -19,9 +19,14 @@ STDMETHODIMP WeaselTSF::OnSetFocus(ITfDocumentMgr* pDocMgrFocus,
       SUCCEEDED(pTfContext->GetDocumentMgr(&pCandidateListDocumentMgr))) {
     if (pCandidateListDocumentMgr != pDocMgrFocus) {
       _HideUI();
+      _HideTip();
     } else {
       _ShowUI();
+      _ShowTip();
     }
+  } else if (pDocMgrFocus != nullptr) {
+    // no UI context yet in this process, but a document of ours gained focus
+    _ShowTip();
   }
 
   return S_OK;

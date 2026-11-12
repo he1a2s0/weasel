@@ -1188,6 +1188,8 @@ void LoadWeaselUIStyle(RimeConfig* config,
                style.display_tray_icon);
   _RimeGetBool(config, "style/ascii_tip_follow_cursor", initialize,
                style.ascii_tip_follow_cursor);
+  _RimeGetBool(config, "style/ascii_tip_persistent", initialize,
+               style.ascii_tip_persistent);
   _RimeGetBool(config, "style/horizontal", initialize, style.layout_type,
                UIStyle::LAYOUT_HORIZONTAL, UIStyle::LAYOUT_VERTICAL);
   _RimeGetBool(config, "style/paging_on_scroll", initialize,

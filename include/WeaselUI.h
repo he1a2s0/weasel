@@ -33,6 +33,9 @@ class UI {
   // 界面显隐
   void Show();
   void Hide();
+  // 常驻中英状态提示（style/ascii_tip_persistent）
+  void ShowTip();
+  void HideTip();
   void ShowWithTimeout(size_t millisec);
   BOOL IsCountingDown() const;
   BOOL IsShown() const;

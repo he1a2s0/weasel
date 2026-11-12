@@ -50,6 +50,8 @@ class CCandidateList : public ITfIntegratableCandidateListUIElement,
   void UpdateUI(const weasel::Context& ctx, const weasel::Status& status);
   void UpdateStyle(const weasel::UIStyle& sty);
   void UpdateInputPosition(RECT const& rc);
+  void ShowTip();
+  void HideTip();
   void Destroy();
   void DestroyAll();
   void StartUI();

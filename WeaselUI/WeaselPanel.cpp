@@ -3,6 +3,7 @@
 #include "HorizontalLayout.h"
 #include "VHorizontalLayout.h"
 #include "VerticalLayout.h"
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <resource.h>
@@ -21,6 +22,18 @@ using namespace weasel;
   ((((color & 0xff000000) >> 25) & 0xff) << 24) | (color & 0x00ffffff)
 
 namespace {
+// Resolve this module's handle (works both inside WeaselServer.exe and inside
+// the host process when weasel runs as a TSF DLL). GetModuleHandle(nullptr)
+// returns the *host* exe in the TSF case, which made LoadImage(MAKEINTRESOURCE)
+// pick up icons from the host application's resources instead of ours.
+HINSTANCE ThisModule() {
+  HINSTANCE h = nullptr;
+  ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&ThisModule), &h);
+  return h;
+}
+
 class ThreadDpiAwarenessScope {
  public:
   ThreadDpiAwarenessScope() {
@@ -52,7 +65,346 @@ wstring FormatCandidateLabel(const wstring& label, const wchar_t* format) {
   swprintf_s<128>(buffer, format, label.c_str());
   return wstring(buffer);
 }
+
+#define LOADICON(x, icon, id) LoadIconIfNeed(m_##x, m_style.##x, icon, id)
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// StatusTipWindow: persistent IME mode badge following the mouse cursor
+// (style/ascii_tip_persistent). Rendered via GDI UpdateLayeredWindow so it
+// shares nothing with the candidate window's Direct2D devices.
+// ---------------------------------------------------------------------------
+class weasel::StatusTipWindow {
+ public:
+  static constexpr int FOLLOW_TIMER = 20261111;
+  static constexpr UINT FOLLOW_INTERVAL = 30;
+  // badge icon is rendered at this fraction of the system icon size
+  static constexpr float ICON_SCALE = 0.6f;
+
+  StatusTipWindow() = default;
+  ~StatusTipWindow() { Hide(); }
+
+  bool Create(HWND owner);
+  void DestroyWindow() {
+    if (m_hWnd) {
+      ::DestroyWindow(m_hWnd);
+      m_hWnd = nullptr;
+    }
+  }
+  bool IsWindow() const { return !!::IsWindow(m_hWnd); }
+  bool IsVisible() const { return IsWindow() && !!::IsWindowVisible(m_hWnd); }
+  void Show(HWND owner, HICON icon);
+  void Hide();
+  void SetIcon(HICON icon);
+
+ private:
+  static LRESULT CALLBACK WindowProc(HWND hwnd,
+                                     UINT uMsg,
+                                     WPARAM wParam,
+                                     LPARAM lParam);
+  LRESULT MsgHandler(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+  void _FollowCursor();
+  bool _ConvertIconToARGB();
+  bool _RenderFromIcon();
+  // bilinear resample of premultiplied BGRA pixels (correct for pre multiplied
+  // data; interpolating straight alpha would produce halos)
+  static std::vector<uint8_t> _ScalePremultipliedBGRA(
+      const std::vector<uint8_t>& src,
+      int sw,
+      int sh,
+      int dw,
+      int dh);
+
+  HWND m_hWnd = nullptr;
+  HWND m_owner = nullptr;
+  HICON m_icon = nullptr;
+  int m_width = 0;
+  int m_height = 0;
+  std::vector<uint8_t> m_argb;
+};
+
+bool StatusTipWindow::Create(HWND owner) {
+  if (m_hWnd)
+    return true;
+  HINSTANCE hInstance = ThisModule();
+  WNDCLASS wc = {};
+  wc.lpfnWndProc = StatusTipWindow::WindowProc;
+  wc.hInstance = hInstance;
+  wc.lpszClassName = L"WeaselStatusTip";
+  ATOM atom = RegisterClass(&wc);
+  if (!atom && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+    return false;
+  m_owner = owner;
+  const DWORD ex_style = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
+                         WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+  // no owner window: the focused app's window belongs to another process and
+  // cross-process ownership is illegal (hangs/crashes); WS_EX_NOACTIVATE +
+  // WS_EX_TOPMOST already keep the window unowned and on top
+  m_hWnd = CreateWindowEx(ex_style, L"WeaselStatusTip", L"", WS_POPUP, 0, 0, 0,
+                          0, nullptr, nullptr, hInstance, this);
+  return !!m_hWnd;
+}
+
+void StatusTipWindow::Show(HWND owner, HICON icon) {
+  if (!icon)
+    return;
+  if (!owner || !::IsWindow(owner))
+    owner = ::GetForegroundWindow();
+  m_owner = owner;
+  if (!IsWindow() && !Create(owner))
+    return;
+  SetIcon(icon);
+  ::ShowWindow(m_hWnd, SW_SHOWNOACTIVATE);
+  _FollowCursor();
+  ::SetTimer(m_hWnd, FOLLOW_TIMER, FOLLOW_INTERVAL, NULL);
+}
+
+void StatusTipWindow::Hide() {
+  if (!IsWindow())
+    return;
+  ::KillTimer(m_hWnd, FOLLOW_TIMER);
+  ::ShowWindow(m_hWnd, SW_HIDE);
+}
+
+void StatusTipWindow::SetIcon(HICON icon) {
+  if (icon == m_icon)
+    return;
+  m_icon = icon;
+  if (_ConvertIconToARGB())
+    _RenderFromIcon();
+}
+
+void StatusTipWindow::_FollowCursor() {
+  if (!IsWindow())
+    return;
+  if (!m_owner || !::IsWindow(m_owner)) {
+    Hide();
+    return;
+  }
+  // hide when the focused window no longer belongs to the owner process
+  DWORD owner_pid = 0;
+  DWORD foreground_pid = 0;
+  ::GetWindowThreadProcessId(m_owner, &owner_pid);
+  ::GetWindowThreadProcessId(::GetForegroundWindow(), &foreground_pid);
+  if (foreground_pid != owner_pid) {
+    Hide();
+    return;
+  }
+  POINT p{};
+  if (!::GetCursorPos(&p))
+    return;
+  int x = p.x + 16;
+  int y = p.y + 16;
+  HMONITOR hmon = ::MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
+  MONITORINFO mi = {sizeof(mi)};
+  if (hmon && ::GetMonitorInfo(hmon, &mi)) {
+    x = MAX(x, mi.rcWork.left);
+    y = MAX(y, mi.rcWork.top);
+    x = MIN(x, mi.rcWork.right - m_width);
+    y = MIN(y, mi.rcWork.bottom - m_height);
+  }
+  ::SetWindowPos(m_hWnd, HWND_TOPMOST, x, y, 0, 0,
+                 SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+bool StatusTipWindow::_ConvertIconToARGB() {
+  m_argb.clear();
+  m_width = m_height = 0;
+  if (!m_icon)
+    return false;
+  ICONINFO ii = {};
+  if (!::GetIconInfo(m_icon, &ii))
+    return false;
+  bool ok = false;
+  BITMAP bm = {};
+  if (ii.hbmColor && ::GetObject(ii.hbmColor, sizeof(bm), &bm)) {
+    const int w = bm.bmWidth;
+    const int h = bm.bmHeight < 0 ? -bm.bmHeight : bm.bmHeight;
+    if (w > 0 && h > 0) {
+      std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4, 0);
+      BITMAPINFO bmi = {};
+      bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+      bmi.bmiHeader.biWidth = w;
+      bmi.bmiHeader.biHeight = -h;
+      bmi.bmiHeader.biPlanes = 1;
+      bmi.bmiHeader.biBitCount = 32;
+      bmi.bmiHeader.biCompression = BI_RGB;
+      HDC hdc = ::GetDC(nullptr);
+      if (::GetDIBits(hdc, ii.hbmColor, 0, h, px.data(), &bmi,
+                      DIB_RGB_COLORS) == h) {
+        bool any_alpha = false;
+        bool all_opaque = true;
+        for (size_t i = 3; i < px.size(); i += 4) {
+          if (px[i]) {
+            any_alpha = true;
+            if (px[i] != 255)
+              all_opaque = false;
+          }
+        }
+        // build alpha from the AND mask when the color bitmap carries no
+        // meaningful alpha channel: either no alpha at all, or a fully
+        // opaque 32bpp frame whose transparency comes from the mask
+        // (legacy icon format used by the bundled .ico files)
+        if ((!any_alpha || all_opaque) && ii.hbmMask) {
+          const int mask_row = ((w + 15) / 16) * 2;
+          std::vector<uint8_t> mask(static_cast<size_t>(mask_row) * h, 0);
+          BITMAPINFO mbmi = bmi;
+          mbmi.bmiHeader.biBitCount = 1;
+          if (::GetDIBits(hdc, ii.hbmMask, 0, h, mask.data(), &mbmi,
+                          DIB_RGB_COLORS) == h) {
+            for (int row = 0; row < h; ++row) {
+              for (int col = 0; col < w; ++col) {
+                const int bit =
+                    (mask[row * mask_row + col / 8] >> (col % 8)) & 1;
+                px[(static_cast<size_t>(row) * w + col) * 4 + 3] =
+                    bit ? 0 : 255;  // AND mask: 1 = transparent
+              }
+            }
+          }
+        }
+        // premultiply alpha for UpdateLayeredWindow
+        for (size_t i = 0; i < px.size(); i += 4) {
+          const uint8_t a = px[i + 3];
+          if (a == 0) {
+            px[i] = px[i + 1] = px[i + 2] = 0;
+          } else if (a != 255) {
+            px[i] = static_cast<uint8_t>(px[i] * a / 255);
+            px[i + 1] = static_cast<uint8_t>(px[i + 1] * a / 255);
+            px[i + 2] = static_cast<uint8_t>(px[i + 2] * a / 255);
+          }
+        }
+        int out_w = w;
+        int out_h = h;
+        const int target_w =
+            MAX(1, static_cast<int>(lroundf(w * StatusTipWindow::ICON_SCALE)));
+        const int target_h =
+            MAX(1, static_cast<int>(lroundf(h * StatusTipWindow::ICON_SCALE)));
+        if (target_w != w || target_h != h) {
+          m_argb = StatusTipWindow::_ScalePremultipliedBGRA(px, w, h, target_w,
+                                                            target_h);
+          out_w = target_w;
+          out_h = target_h;
+        } else {
+          m_argb = std::move(px);
+        }
+        m_width = out_w;
+        m_height = out_h;
+        ok = true;
+      }
+      ::ReleaseDC(nullptr, hdc);
+    }
+  }
+  if (ii.hbmColor)
+    ::DeleteObject(ii.hbmColor);
+  if (ii.hbmMask)
+    ::DeleteObject(ii.hbmMask);
+  return ok;
+}
+
+std::vector<uint8_t> StatusTipWindow::_ScalePremultipliedBGRA(
+    const std::vector<uint8_t>& src,
+    int sw,
+    int sh,
+    int dw,
+    int dh) {
+  std::vector<uint8_t> dst(static_cast<size_t>(dw) * dh * 4, 0);
+  for (int y = 0; y < dh; ++y) {
+    const float fy = (y + 0.5f) * sh / dh - 0.5f;
+    int y0 = static_cast<int>(floorf(fy));
+    const float wy = fy - static_cast<float>(y0);
+    y0 = MAX(0, MIN(sh - 1, y0));
+    const int y1 = MIN(sh - 1, y0 + 1);
+    for (int x = 0; x < dw; ++x) {
+      const float fx = (x + 0.5f) * sw / dw - 0.5f;
+      int x0 = static_cast<int>(floorf(fx));
+      const float wx = fx - static_cast<float>(x0);
+      x0 = MAX(0, MIN(sw - 1, x0));
+      const int x1 = MIN(sw - 1, x0 + 1);
+      const uint8_t* p00 = &src[(static_cast<size_t>(y0) * sw + x0) * 4];
+      const uint8_t* p01 = &src[(static_cast<size_t>(y0) * sw + x1) * 4];
+      const uint8_t* p10 = &src[(static_cast<size_t>(y1) * sw + x0) * 4];
+      const uint8_t* p11 = &src[(static_cast<size_t>(y1) * sw + x1) * 4];
+      uint8_t* d = &dst[(static_cast<size_t>(y) * dw + x) * 4];
+      for (int c = 0; c < 4; ++c) {
+        const float top = p00[c] + (p01[c] - p00[c]) * wx;
+        const float bottom = p10[c] + (p11[c] - p10[c]) * wx;
+        d[c] = static_cast<uint8_t>(
+            MIN(255.0f, MAX(0.0f, top + (bottom - top) * wy) + 0.5f));
+      }
+    }
+  }
+  return dst;
+}
+
+bool StatusTipWindow::_RenderFromIcon() {
+  if (!IsWindow() || m_argb.empty() || m_width <= 0)
+    return false;
+  HDC hdc_screen = ::GetDC(nullptr);
+  BITMAPINFO bmi = {};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = m_width;
+  bmi.bmiHeader.biHeight = -m_height;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HBITMAP hbm = ::CreateDIBSection(hdc_screen, &bmi, DIB_RGB_COLORS, &bits,
+                                   nullptr, 0);
+  bool ok = false;
+  if (hbm && bits) {
+    memcpy(bits, m_argb.data(), m_argb.size());
+    HDC hdc_mem = ::CreateCompatibleDC(hdc_screen);
+    HGDIOBJ old = ::SelectObject(hdc_mem, hbm);
+    POINT pt_src = {0, 0};
+    SIZE size = {m_width, m_height};
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    ok = !!::UpdateLayeredWindow(m_hWnd, hdc_screen, nullptr, &size, hdc_mem,
+                                 &pt_src, 0, &bf, ULW_ALPHA);
+    ::SelectObject(hdc_mem, old);
+    ::DeleteDC(hdc_mem);
+  }
+  if (hbm)
+    ::DeleteObject(hbm);
+  ::ReleaseDC(nullptr, hdc_screen);
+  return ok;
+}
+
+LRESULT CALLBACK StatusTipWindow::WindowProc(HWND hwnd,
+                                             UINT uMsg,
+                                             WPARAM wParam,
+                                             LPARAM lParam) {
+  if (uMsg == WM_NCCREATE) {
+    auto self = static_cast<StatusTipWindow*>(
+        reinterpret_cast<LPCREATESTRUCT>(lParam)->lpCreateParams);
+    SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+  }
+  auto self =
+      reinterpret_cast<StatusTipWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+  if (self)
+    return self->MsgHandler(hwnd, uMsg, wParam, lParam);
+  return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+LRESULT StatusTipWindow::MsgHandler(HWND hwnd,
+                                    UINT uMsg,
+                                    WPARAM wParam,
+                                    LPARAM lParam) {
+  switch (uMsg) {
+    case WM_DESTROY:
+      ::KillTimer(hwnd, FOLLOW_TIMER);
+      return 0;
+    case WM_NCDESTROY:
+      SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+      return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    case WM_TIMER:
+      if (wParam == FOLLOW_TIMER) {
+        _FollowCursor();
+        return 0;
+      }
+      break;
+  }
+  return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
 
 void LoadIconIfNeed(wstring& oicofile,
                     const wstring& icofile,
@@ -64,7 +416,7 @@ void LoadIconIfNeed(wstring& oicofile,
     DestroyIcon(hIcon);
   oicofile = icofile;
   const int STATUS_ICON_SIZE = GetSystemMetrics(SM_CXICON);
-  HINSTANCE hInstance = GetModuleHandle(NULL);
+  HINSTANCE hInstance = ThisModule();
   if (!icofile.empty() && fs::exists(fs::path(icofile)))
     hIcon =
         (HICON)LoadImage(hInstance, icofile.c_str(), IMAGE_ICON,
@@ -89,7 +441,7 @@ WeaselPanel::WeaselPanel(UI& ui)
       hide_candidates(false) {
   // Prepare shared graphics resources early to reduce first paint latency.
   m_pD2D = std::make_shared<D2D>(m_style);
-  auto hInstance = GetModuleHandle(nullptr);
+  auto hInstance = ThisModule();
   m_iconAlpha = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(IDI_EN), IMAGE_ICON,
                                  STATUS_ICON_SIZE, STATUS_ICON_SIZE, LR_SHARED);
   m_iconEnabled =
@@ -106,8 +458,61 @@ WeaselPanel::WeaselPanel(UI& ui)
                        STATUS_ICON_SIZE, STATUS_ICON_SIZE, LR_SHARED);
 }
 
+WeaselPanel::~WeaselPanel() {
+  if (!m_current_zhung_icon.empty())
+    DestroyIcon(m_iconEnabled);
+  if (!m_current_ascii_icon.empty())
+    DestroyIcon(m_iconAlpha);
+  if (!m_current_half_icon.empty())
+    DestroyIcon(m_iconHalf);
+  if (!m_current_full_icon.empty())
+    DestroyIcon(m_iconFull);
+}
+
 BOOL WeaselPanel::IsWindow() const {
   return ::IsWindow(m_hWnd);
+}
+
+HICON WeaselPanel::_SelectStatusIcon() {
+  LOADICON(current_ascii_icon, m_iconAlpha, IDI_EN);
+  LOADICON(current_zhung_icon, m_iconEnabled, IDI_ZH);
+  LOADICON(current_full_icon, m_iconFull, IDI_FULL_SHAPE);
+  LOADICON(current_half_icon, m_iconHalf, IDI_HALF_SHAPE);
+  return m_status.disabled ? m_iconDisabled
+         : m_status.ascii_mode
+             ? m_iconAlpha
+             : (m_status.type == SCHEMA
+                    ? m_iconEnabled
+                    : (m_status.full_shape ? m_iconFull : m_iconHalf));
+}
+
+void WeaselPanel::_UpdateStatusTip() {
+  if (m_preview_mode || !m_style.ascii_tip_persistent) {
+    if (m_statusTip)
+      m_statusTip->Hide();
+    return;
+  }
+  if (!m_statusTip)
+    m_statusTip = std::make_unique<StatusTipWindow>();
+  if (!m_statusTip->IsWindow())
+    m_statusTip->Create(m_parent);
+  // if the candidate panel itself is showing the status icon, the badge is
+  // redundant
+  if (m_layout && m_hWnd && ::IsWindowVisible(m_hWnd) &&
+      m_layout->ShouldDisplayStatusIcon()) {
+    m_statusTip->Hide();
+    return;
+  }
+  m_statusTip->Show(m_parent, _SelectStatusIcon());
+}
+
+void WeaselPanel::ShowStatusTip() {
+  _UpdateStatusTip();
+}
+
+void WeaselPanel::HideStatusTip() {
+  if (m_statusTip)
+    m_statusTip->Hide();
 }
 
 HWND WeaselPanel::hwnd() const {
@@ -156,11 +561,17 @@ void WeaselPanel::ShowWindow(int nCmdShow) {
       }
     }
   }
+  _UpdateStatusTip();
 }
 
 void WeaselPanel::DestroyWindow() {
   // clear timers before releasing window resources
   _ClearTimers();
+
+  if (m_statusTip) {
+    m_statusTip->DestroyWindow();
+    m_statusTip.reset();
+  }
 
   if (m_pD2D) {
     m_pD2D->ReleaseWindowResources();
@@ -198,8 +609,9 @@ void WeaselPanel::MoveTo(RECT rc) {
     RedrawWindow();
     return;
   }
-  if (m_style.ascii_tip_follow_cursor && m_ctx.empty() &&
-      (!m_status.composing) && m_layout->ShouldDisplayStatusIcon()) {
+  if (m_style.ascii_tip_follow_cursor && !m_style.ascii_tip_persistent &&
+      m_ctx.empty() && (!m_status.composing) &&
+      m_layout->ShouldDisplayStatusIcon()) {
     POINT p;
     ::GetCursorPos(&p);
     RECT irc{p.x - STATUS_ICON_SIZE, p.y - STATUS_ICON_SIZE, p.x, p.y};
@@ -298,8 +710,14 @@ void WeaselPanel::_UpdateHideCandidates() {
 }
 
 void WeaselPanel::Refresh() {
-  if (!m_hWnd)
+  if (!m_hWnd) {
+    // The panel window may not exist (e.g. disposed after EndUI in the TSF
+    // path, or before the first composition). The persistent mode badge is
+    // independent of the candidate window, so keep it in sync here instead
+    // of dead-ending the whole status update chain.
+    _UpdateStatusTip();
     return;
+  }
   if (!m_pD2D)
     m_pD2D = std::make_shared<D2D>(m_style);
   m_pD2D->AttachWindow(m_hWnd);
@@ -327,6 +745,7 @@ void WeaselPanel::Refresh() {
     _Reposition();
   }
   RedrawWindow();
+  _UpdateStatusTip();
 }
 
 void WeaselPanel::RepositionPreview() {
@@ -360,7 +779,7 @@ BOOL WeaselPanel::Create(HWND parent, bool preview_mode) {
   } else {
     m_lastCursorPos = CPoint(-1, -1);
   }
-  HINSTANCE hInstance = GetModuleHandle(nullptr);
+  HINSTANCE hInstance = ThisModule();
   WNDCLASS wc = {};
   wc.lpfnWndProc = WeaselPanel::WindowProc;
   wc.hInstance = hInstance;
@@ -460,20 +879,8 @@ void WeaselPanel::DoPaint() {
     }
     if (m_layout->ShouldDisplayStatusIcon()) {
       ComPtr<ID2D1Bitmap1> pBitmap;
-#define LOADICON(x, icon, id) LoadIconIfNeed(m_##x, m_style.##x, icon, id)
-      LOADICON(current_ascii_icon, m_iconAlpha, IDI_EN);
-      LOADICON(current_zhung_icon, m_iconEnabled, IDI_ZH);
-      LOADICON(current_full_icon, m_iconFull, IDI_FULL_SHAPE);
-      LOADICON(current_half_icon, m_iconHalf, IDI_HALF_SHAPE);
-#undef LOADICON
+      HICON ico = _SelectStatusIcon();
 
-      HICON& ico =
-          m_status.disabled ? m_iconDisabled
-          : m_status.ascii_mode
-              ? m_iconAlpha
-              : (m_status.type == SCHEMA
-                     ? m_iconEnabled
-                     : (m_status.full_shape ? m_iconFull : m_iconHalf));
       HRESULT hrIcon = m_pD2D->GetCachedBmpFromIcon(ico, pBitmap);
       // Draw the bitmap
       if (SUCCEEDED(hrIcon) && pBitmap) {

@@ -226,6 +226,20 @@ void CCandidateList::UpdateInputPosition(RECT const& rc) {
   _ui->UpdateInputPosition(rc);
 }
 
+void CCandidateList::ShowTip() {
+  if (_ui) {
+    // style from the server is stored in _style; sync it before showing so
+    // the persistent badge works even before any composition has started
+    _ui->style() = _style;
+    _ui->ShowTip();
+  }
+}
+
+void CCandidateList::HideTip() {
+  if (_ui)
+    _ui->HideTip();
+}
+
 void CCandidateList::Destroy() {
   // EndUI();
   Show(FALSE);
@@ -384,6 +398,16 @@ void WeaselTSF::_ShowUI() {
 
 void WeaselTSF::_HideUI() {
   _cand->Show(FALSE);
+}
+
+void WeaselTSF::_ShowTip() {
+  if (_cand)
+    _cand->ShowTip();
+}
+
+void WeaselTSF::_HideTip() {
+  if (_cand)
+    _cand->HideTip();
 }
 
 com_ptr<ITfContext> WeaselTSF::_GetUIContextDocument() {

@@ -141,6 +141,11 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   void _EndUI();
   void _ShowUI();
   void _HideUI();
+  void _ShowTip();
+  void _HideTip();
+  // query the current IME status from the server, refresh the language bar
+  // and (re)show the persistent mode badge with fresh data
+  void _RefreshStatusAndShowTip();
   com_ptr<ITfContext> _GetUIContextDocument();
 
   /* Display Attribute */

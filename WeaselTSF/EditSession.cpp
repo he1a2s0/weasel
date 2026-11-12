@@ -15,6 +15,11 @@ STDMETHODIMP WeaselTSF::DoEditSession(TfEditCookie ec) {
 
   _UpdateLanguageBar(_status);
 
+  // keep the persistent IME mode badge in sync on every key-driven status
+  // change (ascii toggles, composition end, etc.). Safe to call often: it
+  // only re-renders when the selected icon actually changes.
+  _ShowTip();
+
   bool compositionEnded = false;
   if (ok && _status.composing) {
     _pendingUIContext = context;

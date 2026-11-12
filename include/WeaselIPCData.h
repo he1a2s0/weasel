@@ -229,6 +229,7 @@ struct UIStyle {
   bool inline_preedit;
   bool display_tray_icon;
   bool ascii_tip_follow_cursor;
+  bool ascii_tip_persistent;
   bool paging_on_scroll;
   bool enhanced_position;
   bool click_to_capture;
@@ -307,6 +308,7 @@ struct UIStyle {
         inline_preedit(false),
         display_tray_icon(false),
         ascii_tip_follow_cursor(false),
+        ascii_tip_persistent(false),
         paging_on_scroll(false),
         enhanced_position(false),
         click_to_capture(false),
@@ -384,6 +386,7 @@ struct UIStyle {
         inline_preedit != st.inline_preedit || mark_text != st.mark_text ||
         display_tray_icon != st.display_tray_icon ||
         ascii_tip_follow_cursor != st.ascii_tip_follow_cursor ||
+        ascii_tip_persistent != st.ascii_tip_persistent ||
         current_zhung_icon != st.current_zhung_icon ||
         current_ascii_icon != st.current_ascii_icon ||
         current_half_icon != st.current_half_icon ||
@@ -449,6 +452,7 @@ void serialize(Archive& ar, weasel::UIStyle& s, const unsigned int version) {
   ar & s.preedit_type;
   ar & s.display_tray_icon;
   ar & s.ascii_tip_follow_cursor;
+  ar & s.ascii_tip_persistent;
   ar & s.current_zhung_icon;
   ar & s.current_ascii_icon;
   ar & s.current_half_icon;

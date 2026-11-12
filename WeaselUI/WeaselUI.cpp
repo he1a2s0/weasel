@@ -12,8 +12,8 @@ class UIImpl {
     return panel.IsWindow() && ::IsWindowVisible(panel.hwnd());
   }
   void Refresh() {
-    if (!panel.IsWindow())
-      return;
+    // panel.Refresh() handles a missing window itself (it still keeps the
+    // persistent badge in sync), so no early return here
     panel.Refresh();
   }
   void RepositionPreview() {
@@ -30,6 +30,8 @@ class UIImpl {
       return;
     panel.ShowWindow(SW_HIDE);
   }
+  void ShowTip() { panel.ShowStatusTip(); }
+  void HideTip() { panel.HideStatusTip(); }
   void ShowWithTimeout(size_t millisec) { panel.ShowWithTimeout(millisec); }
   bool IsCountingDown() const { return panel.IsCountingDown(); }
 };
@@ -90,6 +92,20 @@ void UI::Show() {
 void UI::Hide() {
   if (pimpl_) {
     pimpl_->Hide();
+  }
+}
+void UI::ShowTip() {
+  if (!pimpl_) {
+    // Lazily create the panel implementation so the persistent badge can be
+    // shown before any composition has started (the candidate window itself
+    // stays hidden; the badge is an independent layered window).
+    pimpl_ = std::make_unique<UIImpl>(*this);
+  }
+  pimpl_->ShowTip();
+}
+void UI::HideTip() {
+  if (pimpl_) {
+    pimpl_->HideTip();
   }
 }
 void UI::Destroy(bool full) {

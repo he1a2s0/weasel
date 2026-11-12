@@ -6,19 +6,12 @@
 
 namespace weasel {
 
+class StatusTipWindow;
+
 class WeaselPanel {
  public:
   WeaselPanel(UI& ui);
-  ~WeaselPanel() {
-    if (!m_current_zhung_icon.empty())
-      DestroyIcon(m_iconEnabled);
-    if (!m_current_ascii_icon.empty())
-      DestroyIcon(m_iconAlpha);
-    if (!m_current_half_icon.empty())
-      DestroyIcon(m_iconHalf);
-    if (!m_current_full_icon.empty())
-      DestroyIcon(m_iconFull);
-  }
+  ~WeaselPanel();
   void MoveTo(RECT rc);
   void Refresh();
   void RepositionPreview();
@@ -59,6 +52,8 @@ class WeaselPanel {
   CRect _GetInflatedCandRect(int i);
   void _CaptureRect(CRect& rect);
   void _UpdateHideCandidates();
+  HICON _SelectStatusIcon();
+  void _UpdateStatusTip();
 
   void _UpdateOffsetY(CRect& arc, CRect& prc);
 
@@ -128,9 +123,14 @@ class WeaselPanel {
   UINT_PTR m_autoHideTimer = 0;
   int m_lastWindowWidth = -1;
   int m_lastWindowHeight = -1;
+  std::unique_ptr<StatusTipWindow> m_statusTip;
 
  public:
   void ShowWithTimeout(size_t millisec);
   bool IsCountingDown() const;
+
+  // persistent IME mode badge (style/ascii_tip_persistent)
+  void ShowStatusTip();
+  void HideStatusTip();
 };
 }  // namespace weasel

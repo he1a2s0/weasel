@@ -356,6 +356,8 @@ bool GetStyleFieldText(const weasel::UIStyle& style,
     *out = style.display_tray_icon ? "true" : "false";
   else if (key == "style/ascii_tip_follow_cursor")
     *out = style.ascii_tip_follow_cursor ? "true" : "false";
+  else if (key == "style/ascii_tip_persistent")
+    *out = style.ascii_tip_persistent ? "true" : "false";
   else if (key == "style/paging_on_scroll")
     *out = style.paging_on_scroll ? "true" : "false";
   else if (key == "style/click_to_capture")
@@ -502,6 +504,8 @@ bool SetStyleFieldText(weasel::UIStyle& style,
     style.display_tray_icon = truthy;
   else if (key == "style/ascii_tip_follow_cursor")
     style.ascii_tip_follow_cursor = truthy;
+  else if (key == "style/ascii_tip_persistent")
+    style.ascii_tip_persistent = truthy;
   else if (key == "style/paging_on_scroll")
     style.paging_on_scroll = truthy;
   else if (key == "style/click_to_capture")

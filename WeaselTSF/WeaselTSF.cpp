@@ -99,6 +99,8 @@ STDMETHODIMP WeaselTSF::Activate(ITfThreadMgr* pThreadMgr,
 STDMETHODIMP WeaselTSF::Deactivate() {
   m_client.EndSession();
 
+  _HideTip();
+
   _InitTextEditSink(com_ptr<ITfDocumentMgr>());
 
   _UninitThreadMgrEventSink();
@@ -164,6 +166,11 @@ STDMETHODIMP WeaselTSF::ActivateEx(ITfThreadMgr* pThreadMgr,
 
   _EnsureServerConnected();
 
+  // show the persistent mode badge right away when the text service is
+  // activated into an app that already has focus (OnSetThreadFocus may not
+  // fire for the initial activation)
+  _RefreshStatusAndShowTip();
+
   return S_OK;
 
 ExitError:
@@ -171,22 +178,31 @@ ExitError:
   return E_FAIL;
 }
 
+void WeaselTSF::_RefreshStatusAndShowTip() {
+  if (!m_client.Echo())
+    return;
+  m_client.ProcessKeyEvent(0);
+  weasel::ResponseParser parser(NULL, NULL, &_status, NULL, &_cand->style());
+  bool ok = m_client.GetResponseData(std::ref(parser));
+  if (ok) {
+    _UpdateLanguageBar(_status);
+    // refresh the persistent IME mode badge with the current status
+    _UpdateUI(weasel::Context(), _status);
+    _ShowTip();
+  }
+}
+
 STDMETHODIMP WeaselTSF::OnSetThreadFocus() {
   std::wstring _ToggleImeOnOpenClose{};
   RegGetStringValue(HKEY_CURRENT_USER, L"Software\\Rime\\weasel",
                     L"ToggleImeOnOpenClose", _ToggleImeOnOpenClose);
   _isToOpenClose = (_ToggleImeOnOpenClose == L"yes");
-  if (m_client.Echo()) {
-    m_client.ProcessKeyEvent(0);
-    weasel::ResponseParser parser(NULL, NULL, &_status, NULL, &_cand->style());
-    bool ok = m_client.GetResponseData(std::ref(parser));
-    if (ok)
-      _UpdateLanguageBar(_status);
-  }
+  _RefreshStatusAndShowTip();
   return S_OK;
 }
 STDMETHODIMP WeaselTSF::OnKillThreadFocus() {
   _AbortComposition();
+  _HideTip();
   return S_OK;
 }
 BOOL WeaselTSF::_InitThreadFocusSink() {
