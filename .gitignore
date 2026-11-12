@@ -57,3 +57,8 @@ arm64x_wrapper/*.dll
 arm64x_wrapper/*.ime
 arm64x_wrapper/*.lib
 arm64x_wrapper/*.exp
+
+.workbuddy/
+
+# Boost source trees unpacked by install_boost.bat (build-time dependency, never committed)
+/boost_*/
