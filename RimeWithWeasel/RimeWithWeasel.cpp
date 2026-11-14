@@ -54,6 +54,7 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
 }
 
 RimeWithWeaselHandler::~RimeWithWeaselHandler() {
+  _ReleaseTipOwner();
   m_show_notifications.clear();
   m_session_status_map.clear();
   m_app_options.clear();
@@ -219,6 +220,12 @@ DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
 DWORD RimeWithWeaselHandler::RemoveSession(WeaselSessionId ipc_id) {
   if (m_ui)
     m_ui->Hide();
+  // the client that owns the badge is going away, take it down with it
+  if (ipc_id && m_tip_owner == ipc_id) {
+    _ReleaseTipOwner();
+    if (m_ui)
+      m_ui->HideTip();
+  }
   if (m_disabled)
     return 0;
   DLOG(INFO) << "Remove session: session_id = " << to_session_id(ipc_id);
@@ -363,6 +370,78 @@ void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
     rime_api->cleanup_stale_sessions();
 }
 
+DWORD RimeWithWeaselHandler::_ForegroundPid() {
+  HWND hwnd = ::GetForegroundWindow();
+  if (!hwnd)
+    return 0;
+  DWORD pid = 0;
+  ::GetWindowThreadProcessId(hwnd, &pid);
+  return pid;
+}
+
+DWORD RimeWithWeaselHandler::_SessionPid(WeaselSessionId ipc_id) {
+  if (!ipc_id)
+    return 0;
+  auto it = m_session_status_map.find(ipc_id);
+  return it == m_session_status_map.end() ? 0 : it->second.client_pid;
+}
+
+bool RimeWithWeaselHandler::_IsForegroundSession(WeaselSessionId ipc_id) {
+  DWORD pid = _SessionPid(ipc_id);
+  return pid && pid == _ForegroundPid();
+}
+
+void RimeWithWeaselHandler::_ReleaseTipOwner() {
+  m_tip_owner = 0;
+}
+
+void RimeWithWeaselHandler::_SetTipOwner(WeaselSessionId ipc_id) {
+  m_tip_owner = ipc_id;
+}
+
+void RimeWithWeaselHandler::ShowTip(DWORD icon_kind, WeaselSessionId ipc_id) {
+  DLOG(INFO) << "Show tip: kind = " << icon_kind << ", ipc_id = " << ipc_id;
+  if (!m_ui)
+    return;
+  // The badge is a single window for the whole system, while every client
+  // session keeps its own idea of whether it is showing. Sessions talk over
+  // separate pipes, so a request from the window that just lost focus can
+  // arrive after the newly focused window claimed the badge. Reject it while
+  // the current owner is demonstrably the focused window; if the owner is not
+  // the focused one either, the newcomer takes the badge over instead (some
+  // hosts, UWP frames for example, put the foreground window in another
+  // process than the text service).
+  if (ipc_id && m_tip_owner && m_tip_owner != ipc_id &&
+      !_IsForegroundSession(ipc_id) && _IsForegroundSession(m_tip_owner)) {
+    DLOG(INFO) << "Show tip ignored: ipc_id = " << ipc_id
+               << " is not the badge owner " << m_tip_owner;
+    return;
+  }
+  if (ipc_id)
+    _SetTipOwner(ipc_id);
+  // hand the owner's pid down so the badge window can watch it: when the
+  // client process dies without sending Hide, nobody else will take the badge
+  // down
+  m_ui->ShowTip(static_cast<int>(icon_kind), _SessionPid(m_tip_owner));
+}
+
+void RimeWithWeaselHandler::HideTip(WeaselSessionId ipc_id) {
+  DLOG(INFO) << "Hide tip: ipc_id = " << ipc_id;
+  if (!m_ui)
+    return;
+  // A late Hide from the window that already lost focus must not remove the
+  // badge the newly focused window asked for; that window is the foreground
+  // process, this one is not.
+  if (ipc_id && m_tip_owner && m_tip_owner != ipc_id &&
+      !_IsForegroundSession(ipc_id)) {
+    DLOG(INFO) << "Hide tip ignored: ipc_id = " << ipc_id
+               << " is not the badge owner " << m_tip_owner;
+    return;
+  }
+  _ReleaseTipOwner();
+  m_ui->HideTip();
+}
+
 void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,
                                                 WeaselSessionId ipc_id) {
   DLOG(INFO) << "Update input position: (" << rc.left << ", " << rc.top
@@ -412,6 +491,7 @@ void RimeWithWeaselHandler::OnNotify(void* context_object,
 void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
                                             LPWSTR buffer) {
   std::string app_name;
+  DWORD client_pid = 0;
   // parse request text
   wbufferstream bs(buffer, WEASEL_IPC_BUFFER_LENGTH);
   std::wstring line;
@@ -427,9 +507,20 @@ void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
       std::wstring lwr = line;
       to_lower(lwr);
       app_name = wtou8(lwr.substr(kClientAppKey.length()));
+      continue;
+    }
+    const std::wstring kClientPidKey = L"session.client_pid=";
+    if (starts_with(line, kClientPidKey)) {
+      // decimal digits only, no locale/CRT conversion needed
+      DWORD pid = 0;
+      for (const wchar_t* p = line.c_str() + kClientPidKey.length();
+           *p >= L'0' && *p <= L'9'; ++p)
+        pid = pid * 10 + (*p - L'0');
+      client_pid = pid;
     }
   }
   SessionStatus& session_status = get_session_status(ipc_id);
+  session_status.client_pid = client_pid;
   RimeSessionId session_id = session_status.session_id;
   // set app specific options
   if (!app_name.empty()) {

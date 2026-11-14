@@ -138,6 +138,18 @@ void ClientImpl::FocusOut() {
   _SendMessage(WEASEL_IPC_FOCUS_OUT, 0, session_id);
 }
 
+void ClientImpl::ShowTip(int icon_kind) {
+  if (!_Active())
+    return;
+  _SendMessage(WEASEL_IPC_SHOW_TIP, static_cast<DWORD>(icon_kind), session_id);
+}
+
+void ClientImpl::HideTip() {
+  if (!_Active())
+    return;
+  _SendMessage(WEASEL_IPC_HIDE_TIP, 0, session_id);
+}
+
 void ClientImpl::TrayCommand(UINT menuId) {
   _SendMessage(WEASEL_IPC_TRAY_COMMAND, menuId, session_id);
 }
@@ -186,6 +198,10 @@ bool ClientImpl::_WriteClientInfo() {
   channel << L"action=session\n";
   channel << L"session.client_app=" << app_name.c_str() << L"\n";
   channel << L"session.client_type=" << (is_ime ? L"ime" : L"tsf") << L"\n";
+  // The server watches the owning process of the persistent mode badge; it
+  // needs the pid to know when that process dies without sending a Hide.
+  channel << L"session.client_pid="
+          << std::to_wstring(::GetCurrentProcessId()).c_str() << L"\n";
   channel << L".\n";
   return true;
 }
@@ -254,6 +270,14 @@ void Client::FocusIn() {
 
 void Client::FocusOut() {
   m_pImpl->FocusOut();
+}
+
+void Client::ShowTip(int icon_kind) {
+  m_pImpl->ShowTip(icon_kind);
+}
+
+void Client::HideTip() {
+  m_pImpl->HideTip();
 }
 
 void Client::StartSession() {

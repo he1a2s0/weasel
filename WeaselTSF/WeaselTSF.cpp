@@ -97,9 +97,13 @@ STDMETHODIMP WeaselTSF::Activate(ITfThreadMgr* pThreadMgr,
 }
 
 STDMETHODIMP WeaselTSF::Deactivate() {
-  m_client.EndSession();
-
+  // release the shared badge while the session is still valid: HideTip goes
+  // through the pipe and becomes a no-op as soon as EndSession clears the
+  // session id
+  _tipForce = true;
   _HideTip();
+
+  m_client.EndSession();
 
   _InitTextEditSink(com_ptr<ITfDocumentMgr>());
 
@@ -181,6 +185,10 @@ ExitError:
 void WeaselTSF::_RefreshStatusAndShowTip() {
   if (!m_client.Echo())
     return;
+  // called when this thread gains focus or the text service is activated: the
+  // server may still be showing the badge of the previous window, so state the
+  // wish once even if nothing changed here
+  _tipForce = true;
   m_client.ProcessKeyEvent(0);
   weasel::ResponseParser parser(NULL, NULL, &_status, NULL, &_cand->style());
   bool ok = m_client.GetResponseData(std::ref(parser));
@@ -202,6 +210,9 @@ STDMETHODIMP WeaselTSF::OnSetThreadFocus() {
 }
 STDMETHODIMP WeaselTSF::OnKillThreadFocus() {
   _AbortComposition();
+  // releasing the badge has to reach the server even if this window never
+  // showed it: another window may be showing its own badge right now
+  _tipForce = true;
   _HideTip();
   return S_OK;
 }

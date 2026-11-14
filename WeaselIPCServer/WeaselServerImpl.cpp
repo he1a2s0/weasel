@@ -266,6 +266,45 @@ DWORD ServerImpl::OnFocusOut(WEASEL_IPC_COMMAND uMsg,
   return 0;
 }
 
+DWORD ServerImpl::OnShowTip(WEASEL_IPC_COMMAND uMsg,
+                            DWORD wParam,
+                            DWORD lParam) {
+  // The badge window has to be created and driven on the server message
+  // thread: its follow-cursor timer needs a message loop, and pipe worker
+  // threads have none. wParam = icon kind, lParam = requesting session, which
+  // the server uses to tell who owns the badge.
+  ::PostMessage(m_hWnd, WM_WEASEL_TIP_NOTIFY, wParam, lParam);
+  return 0;
+}
+
+DWORD ServerImpl::OnHideTip(WEASEL_IPC_COMMAND uMsg,
+                            DWORD wParam,
+                            DWORD lParam) {
+  ::PostMessage(m_hWnd, WM_WEASEL_TIP_HIDE, lParam, 0);
+  return 0;
+}
+
+LRESULT ServerImpl::OnTipNotifyMessage(UINT uMsg,
+                                       WPARAM wParam,
+                                       LPARAM lParam,
+                                       BOOL& bHandled) {
+  if (!m_pRequestHandler)
+    return 0;
+  m_pRequestHandler->ShowTip(static_cast<DWORD>(wParam),
+                             static_cast<DWORD>(lParam));
+  return 0;
+}
+
+LRESULT ServerImpl::OnTipHideMessage(UINT uMsg,
+                                     WPARAM wParam,
+                                     LPARAM lParam,
+                                     BOOL& bHandled) {
+  if (!m_pRequestHandler)
+    return 0;
+  m_pRequestHandler->HideTip(static_cast<DWORD>(wParam));
+  return 0;
+}
+
 DWORD ServerImpl::OnUpdateInputPosition(WEASEL_IPC_COMMAND uMsg,
                                         DWORD wParam,
                                         DWORD lParam) {
@@ -402,6 +441,8 @@ void ServerImpl::HandlePipeMessage(PipeMessage pipe_msg, _Resp resp) {
   PIPE_MSG_HANDLE(WEASEL_IPC_SHUTDOWN_SERVER, OnShutdownServer)
   PIPE_MSG_HANDLE(WEASEL_IPC_FOCUS_IN, OnFocusIn)
   PIPE_MSG_HANDLE(WEASEL_IPC_FOCUS_OUT, OnFocusOut)
+  PIPE_MSG_HANDLE(WEASEL_IPC_SHOW_TIP, OnShowTip)
+  PIPE_MSG_HANDLE(WEASEL_IPC_HIDE_TIP, OnHideTip)
   PIPE_MSG_HANDLE(WEASEL_IPC_UPDATE_INPUT_POS, OnUpdateInputPosition)
   PIPE_MSG_HANDLE(WEASEL_IPC_START_MAINTENANCE, OnStartMaintenance)
   PIPE_MSG_HANDLE(WEASEL_IPC_END_MAINTENANCE, OnEndMaintenance)

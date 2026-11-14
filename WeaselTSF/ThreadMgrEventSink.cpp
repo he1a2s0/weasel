@@ -13,6 +13,11 @@ STDMETHODIMP WeaselTSF::OnSetFocus(ITfDocumentMgr* pDocMgrFocus,
                                    ITfDocumentMgr* pDocMgrPrevFocus) {
   _InitTextEditSink(pDocMgrFocus);
 
+  // focus moved inside this thread (another window or document of the same
+  // app): the server side badge may belong to the window that just lost focus,
+  // so state this window's wish even when its own state did not change
+  _tipForce = true;
+
   com_ptr<ITfDocumentMgr> pCandidateListDocumentMgr;
   com_ptr<ITfContext> pTfContext = _GetUIContextDocument();
   if ((nullptr != pTfContext) &&

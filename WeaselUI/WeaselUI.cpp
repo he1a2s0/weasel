@@ -30,7 +30,9 @@ class UIImpl {
       return;
     panel.ShowWindow(SW_HIDE);
   }
-  void ShowTip() { panel.ShowStatusTip(); }
+  void ShowTip(int icon_kind, DWORD owner_pid) {
+    panel.ShowStatusTip(icon_kind, owner_pid);
+  }
   void HideTip() { panel.HideStatusTip(); }
   void ShowWithTimeout(size_t millisec) { panel.ShowWithTimeout(millisec); }
   bool IsCountingDown() const { return panel.IsCountingDown(); }
@@ -94,14 +96,14 @@ void UI::Hide() {
     pimpl_->Hide();
   }
 }
-void UI::ShowTip() {
+void UI::ShowTip(int icon_kind, DWORD owner_pid) {
   if (!pimpl_) {
     // Lazily create the panel implementation so the persistent badge can be
-    // shown before any composition has started (the candidate window itself
-    // stays hidden; the badge is an independent layered window).
+    // decided before any composition has started. The client only evaluates
+    // the decision here; the badge window itself lives in WeaselServer.
     pimpl_ = std::make_unique<UIImpl>(*this);
   }
-  pimpl_->ShowTip();
+  pimpl_->ShowTip(icon_kind, owner_pid);
 }
 void UI::HideTip() {
   if (pimpl_) {

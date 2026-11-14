@@ -32,12 +32,24 @@ enum WEASEL_IPC_COMMAND {
   WEASEL_IPC_SELECT_CANDIDATE_ON_CURRENT_PAGE,
   WEASEL_IPC_HIGHLIGHT_CANDIDATE_ON_CURRENT_PAGE,
   WEASEL_IPC_CHANGE_PAGE,
+  WEASEL_IPC_SHOW_TIP,
+  WEASEL_IPC_HIDE_TIP,
   WEASEL_IPC_LAST_COMMAND
 };
 
 // Posted by WeaselTrayIcon to the server window so that Shell_NotifyIcon runs
 // on the server message thread instead of a pipe worker thread.
 #define WM_WEASEL_SERVICE_NOTIFY (WEASEL_IPC_LAST_COMMAND + 200)
+
+// Posted by the pipe worker thread to the server window so the persistent mode
+// badge is created and driven on the server message thread (it needs a message
+// loop for its follow-cursor timer). wParam = icon kind, lParam = requesting
+// IPC session id (which client owns the badge).
+#define WM_WEASEL_TIP_NOTIFY (WEASEL_IPC_LAST_COMMAND + 201)
+
+// Same, for hiding the badge. wParam = requesting IPC session id, so the
+// server can ignore a late request from a window that already lost focus.
+#define WM_WEASEL_TIP_HIDE (WEASEL_IPC_LAST_COMMAND + 202)
 
 namespace weasel {
 struct PipeMessage {
@@ -80,6 +92,9 @@ struct RequestHandler {
   }
   virtual void FocusIn(DWORD param, DWORD session_id) {}
   virtual void FocusOut(DWORD param, DWORD session_id) {}
+  // 常驻中英状态徽标：图标由客户端决定，窗口由服务进程创建
+  virtual void ShowTip(DWORD icon_kind, DWORD session_id) {}
+  virtual void HideTip(DWORD session_id) {}
   virtual void UpdateInputPosition(RECT const& rc, DWORD session_id) {}
   virtual void StartMaintenance() {}
   virtual void EndMaintenance() {}
@@ -142,6 +157,9 @@ class Client {
   void FocusIn();
   // 输入窗口失去焦点
   void FocusOut();
+  // 显示/隐藏常驻中英状态徽标（窗口由服务进程创建），icon_kind 见 StatusTipIcon
+  void ShowTip(int icon_kind);
+  void HideTip();
   // 托盤菜單
   void TrayCommand(UINT menuId);
   // 读取server返回的数据

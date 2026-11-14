@@ -52,7 +52,8 @@ class WeaselPanel {
   CRect _GetInflatedCandRect(int i);
   void _CaptureRect(CRect& rect);
   void _UpdateHideCandidates();
-  HICON _SelectStatusIcon();
+  int _StatusTipKind();
+  HICON _StatusTipIcon(int kind);
   void _UpdateStatusTip();
 
   void _UpdateOffsetY(CRect& arc, CRect& prc);
@@ -110,6 +111,7 @@ class WeaselPanel {
   wstring m_current_half_icon;
   wstring m_current_full_icon;
   UICallbackFunc& m_uiCallback;
+  TipCallbackFunc& m_tipCallback;
   // window handle and per-instance click timer
   HWND m_hWnd;
   HWND m_parent = nullptr;
@@ -130,7 +132,7 @@ class WeaselPanel {
   bool IsCountingDown() const;
 
   // persistent IME mode badge (style/ascii_tip_persistent)
-  void ShowStatusTip();
+  void ShowStatusTip(int icon_kind = STATUS_TIP_NONE, DWORD owner_pid = 0);
   void HideStatusTip();
 };
 }  // namespace weasel

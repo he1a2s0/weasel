@@ -23,13 +23,20 @@ typedef std::map<std::string, AppOptions, CaseInsensitiveCompare>
     AppOptionsByAppName;
 
 struct SessionStatus {
-  SessionStatus() : style(weasel::UIStyle()), __synced(false), session_id(0) {
+  SessionStatus()
+      : style(weasel::UIStyle()),
+        __synced(false),
+        session_id(0),
+        client_pid(0) {
     RIME_STRUCT(RimeStatus, status);
   }
   weasel::UIStyle style;
   RimeStatus status;
   bool __synced;
   RimeSessionId session_id;
+  // process that created this session; used to watch for the death of the
+  // client that owns the persistent mode badge
+  DWORD client_pid;
 };
 typedef std::map<DWORD, SessionStatus> SessionStatusMap;
 typedef DWORD WeaselSessionId;
@@ -61,6 +68,8 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   virtual bool ChangePage(bool backward, WeaselSessionId ipc_id, EatLine eat);
   virtual void FocusIn(DWORD param, WeaselSessionId ipc_id);
   virtual void FocusOut(DWORD param, WeaselSessionId ipc_id);
+  virtual void ShowTip(DWORD icon_kind, WeaselSessionId ipc_id);
+  virtual void HideTip(WeaselSessionId ipc_id);
   virtual void UpdateInputPosition(RECT const& rc, WeaselSessionId ipc_id);
   virtual void StartMaintenance();
   virtual void EndMaintenance();
@@ -82,6 +91,13 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool _ShowMessage(weasel::Context& ctx, weasel::Status& status);
   bool _Respond(WeaselSessionId ipc_id, EatLine eat);
   void _ReadClientInfo(WeaselSessionId ipc_id, LPWSTR buffer);
+  // persistent mode badge ownership (see ShowTip/HideTip)
+  void _SetTipOwner(WeaselSessionId ipc_id);
+  void _ReleaseTipOwner();
+  DWORD _SessionPid(WeaselSessionId ipc_id);
+  bool _IsForegroundSession(WeaselSessionId ipc_id);
+  // pid of the process owning the foreground window, 0 if unknown
+  static DWORD _ForegroundPid();
   void _GetCandidateInfo(weasel::CandidateInfo& cinfo, RimeContext& ctx);
   void _GetStatus(weasel::Status& stat,
                   WeaselSessionId ipc_id,
@@ -126,4 +142,8 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool m_global_ascii_mode;
   int m_show_notifications_time;
   DWORD m_pid;
+  // the badge is a single window shared by every client, so the server has to
+  // remember which session it belongs to: only that session may hide it, and
+  // its process is watched so a crash cannot leave the badge on screen
+  WeaselSessionId m_tip_owner = 0;
 };

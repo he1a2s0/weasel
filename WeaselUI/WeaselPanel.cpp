@@ -84,6 +84,9 @@ class weasel::StatusTipWindow {
  public:
   static constexpr int FOLLOW_TIMER = 20261111;
   static constexpr UINT FOLLOW_INTERVAL = 30;
+  // how often to ask whether the client that owns the badge is still alive,
+  // in follow-timer ticks (~300 ms)
+  static constexpr UINT LIVE_CHECK_TICKS = 10;
   // badge icon is rendered at this fraction of the system icon size
   static constexpr float ICON_SCALE = 0.6f;
 
@@ -99,7 +102,7 @@ class weasel::StatusTipWindow {
   }
   bool IsWindow() const { return !!::IsWindow(m_hWnd); }
   bool IsVisible() const { return IsWindow() && !!::IsWindowVisible(m_hWnd); }
-  void Show(HWND owner, HICON icon);
+  void Show(HWND owner, HICON icon, DWORD owner_pid = 0);
   void Hide();
   void SetIcon(HICON icon);
 
@@ -110,6 +113,7 @@ class weasel::StatusTipWindow {
                                      LPARAM lParam);
   LRESULT MsgHandler(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
   void _FollowCursor();
+  bool _IsOwnerAlive() const;
   bool _ConvertIconToARGB();
   bool _RenderFromIcon();
   // bilinear resample of premultiplied BGRA pixels (correct for pre multiplied
@@ -124,6 +128,9 @@ class weasel::StatusTipWindow {
   HWND m_hWnd = nullptr;
   HWND m_owner = nullptr;
   HICON m_icon = nullptr;
+  // process that asked for the badge; the window hides itself when it dies
+  DWORD m_owner_pid = 0;
+  UINT m_liveness_ticks = 0;
   int m_width = 0;
   int m_height = 0;
   std::vector<uint8_t> m_argb;
@@ -163,12 +170,14 @@ bool StatusTipWindow::Create(HWND owner) {
   return true;
 }
 
-void StatusTipWindow::Show(HWND owner, HICON icon) {
+void StatusTipWindow::Show(HWND owner, HICON icon, DWORD owner_pid) {
   if (!icon)
     return;
   if (!owner || !::IsWindow(owner))
     owner = ::GetForegroundWindow();
   m_owner = owner;
+  m_owner_pid = owner_pid;
+  m_liveness_ticks = 0;
   if (!IsWindow() && !Create(owner))
     return;
   SetIcon(icon);
@@ -192,6 +201,20 @@ void StatusTipWindow::SetIcon(HICON icon) {
     _RenderFromIcon();
 }
 
+bool StatusTipWindow::_IsOwnerAlive() const {
+  if (!m_owner_pid || m_owner_pid == ::GetCurrentProcessId())
+    return true;
+  HANDLE process =
+      ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, m_owner_pid);
+  if (!process)
+    return true;  // can't tell (protected or elevated process): keep the badge
+  DWORD exit_code = 0;
+  const bool alive =
+      ::GetExitCodeProcess(process, &exit_code) && exit_code == STILL_ACTIVE;
+  ::CloseHandle(process);
+  return alive;
+}
+
 void StatusTipWindow::_FollowCursor() {
   if (!IsWindow())
     return;
@@ -199,15 +222,20 @@ void StatusTipWindow::_FollowCursor() {
     Hide();
     return;
   }
-  // hide when the focused window no longer belongs to the owner process
-  DWORD owner_pid = 0;
-  DWORD foreground_pid = 0;
-  ::GetWindowThreadProcessId(m_owner, &owner_pid);
-  ::GetWindowThreadProcessId(::GetForegroundWindow(), &foreground_pid);
-  if (foreground_pid != owner_pid) {
-    Hide();
-    return;
+  // The badge is owned by WeaselServer but shows the state of a client process
+  // that may be killed without a chance to send Hide. Nobody else would take
+  // the badge down, so watch the owner here.
+  if (m_owner_pid && ++m_liveness_ticks >= LIVE_CHECK_TICKS) {
+    m_liveness_ticks = 0;
+    if (!_IsOwnerAlive()) {
+      Hide();
+      return;
+    }
   }
+  // No foreground-process check here: the badge lives in WeaselServer, so the
+  // foreground window always belongs to some other process (the client app) and
+  // such a comparison would hide the badge immediately. Visibility is driven by
+  // the client's ShowTip/HideTip IPC instead.
   POINT p{};
   if (!::GetCursorPos(&p))
     return;
@@ -456,6 +484,7 @@ WeaselPanel::WeaselPanel(UI& ui)
       m_in_server(ui.InServer()),
       m_style(ui.style()),
       m_uiCallback(ui.uiCallback()),
+      m_tipCallback(ui.tipCallback()),
       m_ostyle(ui.ostyle()),
       m_candidateCount(0),
       m_lastCandidateCount(0),
@@ -494,44 +523,81 @@ BOOL WeaselPanel::IsWindow() const {
   return ::IsWindow(m_hWnd);
 }
 
-HICON WeaselPanel::_SelectStatusIcon() {
-  LOADICON(current_ascii_icon, m_iconAlpha, IDI_EN);
-  LOADICON(current_zhung_icon, m_iconEnabled, IDI_ZH);
-  LOADICON(current_full_icon, m_iconFull, IDI_FULL_SHAPE);
-  LOADICON(current_half_icon, m_iconHalf, IDI_HALF_SHAPE);
-  return m_status.disabled ? m_iconDisabled
-         : m_status.ascii_mode
-             ? m_iconAlpha
-             : (m_status.type == SCHEMA
-                    ? m_iconEnabled
-                    : (m_status.full_shape ? m_iconFull : m_iconHalf));
+int WeaselPanel::_StatusTipKind() {
+  return m_status.disabled
+             ? STATUS_TIP_DISABLED
+             : m_status.ascii_mode
+                   ? STATUS_TIP_ASCII
+                   : (m_status.type == SCHEMA
+                          ? STATUS_TIP_ZH
+                          : (m_status.full_shape ? STATUS_TIP_FULL
+                                                 : STATUS_TIP_HALF));
+}
+
+HICON WeaselPanel::_StatusTipIcon(int kind) {
+  switch (kind) {
+    case STATUS_TIP_DISABLED:
+      return m_iconDisabled;
+    case STATUS_TIP_ASCII:
+      LOADICON(current_ascii_icon, m_iconAlpha, IDI_EN);
+      return m_iconAlpha;
+    case STATUS_TIP_ZH:
+      LOADICON(current_zhung_icon, m_iconEnabled, IDI_ZH);
+      return m_iconEnabled;
+    case STATUS_TIP_FULL:
+      LOADICON(current_full_icon, m_iconFull, IDI_FULL_SHAPE);
+      return m_iconFull;
+    case STATUS_TIP_HALF:
+      LOADICON(current_half_icon, m_iconHalf, IDI_HALF_SHAPE);
+      return m_iconHalf;
+    default:
+      return nullptr;
+  }
 }
 
 void WeaselPanel::_UpdateStatusTip() {
-  if (m_preview_mode || !m_style.ascii_tip_persistent) {
-    if (m_statusTip)
-      m_statusTip->Hide();
+  if (!m_in_server) {
+    // The badge window is created inside WeaselServer. A top-level popup living
+    // in the host process trips dialog checks before closing (MMC refuses to
+    // close Event Viewer with "close all dialog boxes") and cannot be kept out
+    // of screen capture without also leaking into recordings. The client only
+    // evaluates the decision and hands it over.
+    if (!m_tipCallback)
+      return;
+    const bool enabled = !m_preview_mode && m_style.ascii_tip_persistent;
+    // if the candidate window is visible and already carries the status icon,
+    // the badge is redundant
+    const bool redundant = m_layout && m_hWnd && ::IsWindowVisible(m_hWnd) &&
+                           m_layout->ShouldDisplayStatusIcon();
+    m_tipCallback(enabled && !redundant, _StatusTipKind());
     return;
   }
+  // server side: visibility and icon are driven by the client's ShowTip/HideTip
+  // requests, and those arrive on the server message thread. Refreshes often
+  // run on a pipe worker thread, so nothing is touched here.
+}
+
+void WeaselPanel::ShowStatusTip(int icon_kind, DWORD owner_pid) {
+  if (!m_in_server) {
+    _UpdateStatusTip();
+    return;
+  }
+  if (m_preview_mode || !m_style.ascii_tip_persistent)
+    return;
+  const int kind = icon_kind >= 0 ? icon_kind : _StatusTipKind();
   if (!m_statusTip)
     m_statusTip = std::make_unique<StatusTipWindow>();
   if (!m_statusTip->IsWindow())
     m_statusTip->Create(m_parent);
-  // if the candidate panel itself is showing the status icon, the badge is
-  // redundant
-  if (m_layout && m_hWnd && ::IsWindowVisible(m_hWnd) &&
-      m_layout->ShouldDisplayStatusIcon()) {
-    m_statusTip->Hide();
-    return;
-  }
-  m_statusTip->Show(m_parent, _SelectStatusIcon());
-}
-
-void WeaselPanel::ShowStatusTip() {
-  _UpdateStatusTip();
+  m_statusTip->Show(m_parent, _StatusTipIcon(kind), owner_pid);
 }
 
 void WeaselPanel::HideStatusTip() {
+  if (!m_in_server) {
+    if (m_tipCallback)
+      m_tipCallback(false, STATUS_TIP_NONE);
+    return;
+  }
   if (m_statusTip)
     m_statusTip->Hide();
 }
@@ -900,7 +966,7 @@ void WeaselPanel::DoPaint() {
     }
     if (m_layout->ShouldDisplayStatusIcon()) {
       ComPtr<ID2D1Bitmap1> pBitmap;
-      HICON ico = _SelectStatusIcon();
+      HICON ico = _StatusTipIcon(_StatusTipKind());
 
       HRESULT hrIcon = m_pD2D->GetCachedBmpFromIcon(ico, pBitmap);
       // Draw the bitmap

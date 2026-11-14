@@ -143,6 +143,9 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   void _HideUI();
   void _ShowTip();
   void _HideTip();
+  // 徽标窗口由 WeaselServer 创建，这里只把显示状态转交过去
+  void _ClientShowTip(int icon_kind);
+  void _ClientHideTip();
   // query the current IME status from the server, refresh the language bar
   // and (re)show the persistent mode badge with fresh data
   void _RefreshStatusAndShowTip();
@@ -237,6 +240,15 @@ class WeaselTSF : public ITfTextInputProcessorEx,
 
   /* IME status */
   weasel::Status _status;
+  // last badge state handed to the server, to avoid one IPC round trip per
+  // keystroke
+  bool _tipShown = false;
+  int _tipIconKind = -1;
+  // set on focus transitions: the server keeps a single badge for the whole
+  // system, so the newly focused window must state its wish even when its own
+  // idea of the badge has not changed - that is what releases the badge of the
+  // window that just lost focus
+  bool _tipForce = false;
 
   // guidatom for the display attibute.
   TfGuidAtom _gaDisplayAttributeInput;

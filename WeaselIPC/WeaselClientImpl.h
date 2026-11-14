@@ -26,6 +26,8 @@ class ClientImpl {
   void UpdateInputPosition(RECT const& rc);
   void FocusIn();
   void FocusOut();
+  void ShowTip(int icon_kind);
+  void HideTip();
   void TrayCommand(UINT menuId);
   bool GetResponseData(ResponseHandler const& handler);
 

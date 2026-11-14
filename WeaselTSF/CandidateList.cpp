@@ -11,6 +11,19 @@ using namespace weasel;
 CCandidateList::CCandidateList(com_ptr<WeaselTSF> pTextService)
     : _ui(make_unique<UI>()), _tsf(pTextService), _pbShow(TRUE) {
   _cRef = 1;
+  // The persistent badge is a window owned by WeaselServer: a top-level popup
+  // created inside the host process trips the "close all dialog boxes" check of
+  // apps like MMC and cannot be excluded from screen capture. Only the decision
+  // is made here, because only the client knows the status and whether its own
+  // candidate window already shows the icon.
+  _ui->SetTipCallback([this](bool show, int icon_kind) {
+    if (!_tsf)
+      return;
+    if (show)
+      _tsf->_ClientShowTip(icon_kind);
+    else
+      _tsf->_ClientHideTip();
+  });
 }
 
 CCandidateList::~CCandidateList() {}
@@ -242,12 +255,16 @@ void CCandidateList::HideTip() {
 
 void CCandidateList::Destroy() {
   // EndUI();
+  if (_ui)
+    _ui->HideTip();
   Show(FALSE);
   _DisposeUIWindow();
 }
 
 void CCandidateList::DestroyAll() {
   // EndUI();
+  if (_ui)
+    _ui->HideTip();
   Show(FALSE);
   _DisposeUIWindowAll();
 }
@@ -408,6 +425,26 @@ void WeaselTSF::_ShowTip() {
 void WeaselTSF::_HideTip() {
   if (_cand)
     _cand->HideTip();
+}
+
+void WeaselTSF::_ClientShowTip(int icon_kind) {
+  // the panel refresh calls this on every keystroke; only forward real changes
+  // (focus transitions force one message through, see _tipForce)
+  if (!_tipForce && _tipShown && _tipIconKind == icon_kind)
+    return;
+  _tipForce = false;
+  _tipShown = true;
+  _tipIconKind = icon_kind;
+  m_client.ShowTip(icon_kind);
+}
+
+void WeaselTSF::_ClientHideTip() {
+  if (!_tipForce && !_tipShown)
+    return;
+  _tipForce = false;
+  _tipShown = false;
+  _tipIconKind = -1;
+  m_client.HideTip();
 }
 
 com_ptr<ITfContext> WeaselTSF::_GetUIContextDocument() {
