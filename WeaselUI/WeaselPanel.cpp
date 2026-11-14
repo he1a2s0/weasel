@@ -130,8 +130,7 @@ class weasel::StatusTipWindow {
 };
 
 bool StatusTipWindow::Create(HWND owner) {
-  // the window can be destroyed by the system together with its owner, so
-  // validate the handle instead of trusting a stale non-null m_hWnd
+  // validate the handle instead of trusting a possibly stale non-null m_hWnd
   if (::IsWindow(m_hWnd))
     return true;
   m_hWnd = nullptr;
@@ -146,21 +145,15 @@ bool StatusTipWindow::Create(HWND owner) {
   m_owner = owner;
   const DWORD ex_style = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
                          WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
-  // Owner the badge to the host window when both live in this process (the TSF
-  // DLL is loaded into the host). An unowned top-level popup looks like a
-  // stray, still-open dialog box to apps that check before closing - MMC
-  // refuses to close Event Viewer with "you must close all dialog boxes"
-  // while one is around. Cross-process ownership is illegal (hangs/crashes),
-  // so stay unowned when the UI runs inside WeaselServer.
-  HWND owner_hwnd = nullptr;
-  if (owner && ::IsWindow(owner)) {
-    DWORD owner_pid = 0;
-    ::GetWindowThreadProcessId(owner, &owner_pid);
-    if (owner_pid == ::GetCurrentProcessId())
-      owner_hwnd = owner;
-  }
+  // Deliberately unowned. An owned popup drags its owner along: showing one
+  // activates the owner, and the owner is raised together with it. Hosts that
+  // put several top-level windows in one process (two Windows Terminal windows,
+  // for example) then see the window this badge was created against yanked back
+  // to the foreground on every refresh, because a process-wide foreground check
+  // cannot tell those windows apart. Cross-process ownership is illegal anyway,
+  // so the badge stays an unowned topmost popup.
   m_hWnd = CreateWindowEx(ex_style, L"WeaselStatusTip", L"", WS_POPUP, 0, 0, 0,
-                          0, owner_hwnd, nullptr, hInstance, this);
+                          0, nullptr, nullptr, hInstance, this);
   if (!m_hWnd)
     return false;
   // Keep the badge out of screenshots, screen recordings and shared screens
