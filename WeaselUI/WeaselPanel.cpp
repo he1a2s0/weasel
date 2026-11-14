@@ -10,6 +10,12 @@
 #include <windowsx.h>
 #include <wrl/client.h>
 
+// WDA_EXCLUDEFROMCAPTURE ships with the Windows 10 2004 (19041) SDK; keep the
+// build working with older SDKs.
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
 namespace fs = std::filesystem;
 
 using namespace weasel;
@@ -124,8 +130,11 @@ class weasel::StatusTipWindow {
 };
 
 bool StatusTipWindow::Create(HWND owner) {
-  if (m_hWnd)
+  // the window can be destroyed by the system together with its owner, so
+  // validate the handle instead of trusting a stale non-null m_hWnd
+  if (::IsWindow(m_hWnd))
     return true;
+  m_hWnd = nullptr;
   HINSTANCE hInstance = ThisModule();
   WNDCLASS wc = {};
   wc.lpfnWndProc = StatusTipWindow::WindowProc;
@@ -137,12 +146,28 @@ bool StatusTipWindow::Create(HWND owner) {
   m_owner = owner;
   const DWORD ex_style = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
                          WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
-  // no owner window: the focused app's window belongs to another process and
-  // cross-process ownership is illegal (hangs/crashes); WS_EX_NOACTIVATE +
-  // WS_EX_TOPMOST already keep the window unowned and on top
+  // Owner the badge to the host window when both live in this process (the TSF
+  // DLL is loaded into the host). An unowned top-level popup looks like a
+  // stray, still-open dialog box to apps that check before closing - MMC
+  // refuses to close Event Viewer with "you must close all dialog boxes"
+  // while one is around. Cross-process ownership is illegal (hangs/crashes),
+  // so stay unowned when the UI runs inside WeaselServer.
+  HWND owner_hwnd = nullptr;
+  if (owner && ::IsWindow(owner)) {
+    DWORD owner_pid = 0;
+    ::GetWindowThreadProcessId(owner, &owner_pid);
+    if (owner_pid == ::GetCurrentProcessId())
+      owner_hwnd = owner;
+  }
   m_hWnd = CreateWindowEx(ex_style, L"WeaselStatusTip", L"", WS_POPUP, 0, 0, 0,
-                          0, nullptr, nullptr, hInstance, this);
-  return !!m_hWnd;
+                          0, owner_hwnd, nullptr, hInstance, this);
+  if (!m_hWnd)
+    return false;
+  // Keep the badge out of screenshots, screen recordings and shared screens
+  // (Win10 2004+; no-op on older systems). Must be done in the process that
+  // owns the window, hence here and not from the caller.
+  ::SetWindowDisplayAffinity(m_hWnd, WDA_EXCLUDEFROMCAPTURE);
+  return true;
 }
 
 void StatusTipWindow::Show(HWND owner, HICON icon) {
@@ -198,10 +223,13 @@ void StatusTipWindow::_FollowCursor() {
   HMONITOR hmon = ::MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
   MONITORINFO mi = {sizeof(mi)};
   if (hmon && ::GetMonitorInfo(hmon, &mi)) {
-    x = MAX(x, mi.rcWork.left);
-    y = MAX(y, mi.rcWork.top);
-    x = MIN(x, mi.rcWork.right - m_width);
-    y = MIN(y, mi.rcWork.bottom - m_height);
+    // clamp to the full monitor rect instead of the work area: rcWork excludes
+    // the taskbar and docked appbars, which kept the badge pinned outside the
+    // taskbar no matter where the cursor went
+    x = MAX(x, mi.rcMonitor.left);
+    y = MAX(y, mi.rcMonitor.top);
+    x = MIN(x, mi.rcMonitor.right - m_width);
+    y = MIN(y, mi.rcMonitor.bottom - m_height);
   }
   ::SetWindowPos(m_hWnd, HWND_TOPMOST, x, y, 0, 0,
                  SWP_NOSIZE | SWP_NOACTIVATE);
