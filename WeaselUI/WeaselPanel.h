@@ -132,7 +132,11 @@ class WeaselPanel {
   bool IsCountingDown() const;
 
   // persistent IME mode badge (style/ascii_tip_persistent)
+  static constexpr UINT WM_APP_STATUS_TIP_SHOW = WM_APP + 0x51;
+  static constexpr UINT WM_APP_STATUS_TIP_HIDE = WM_APP + 0x52;
   void ShowStatusTip(int icon_kind = STATUS_TIP_NONE, DWORD owner_pid = 0);
   void HideStatusTip();
+  // applies a ShowStatusTip request on the thread that owns the panel window
+  void _ApplyStatusTip(int icon_kind, DWORD owner_pid);
 };
 }  // namespace weasel

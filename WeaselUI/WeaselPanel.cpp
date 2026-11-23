@@ -582,6 +582,21 @@ void WeaselPanel::ShowStatusTip(int icon_kind, DWORD owner_pid) {
     _UpdateStatusTip();
     return;
   }
+  if (!m_hWnd)
+    return;
+  // Show/Hide requests arrive on a pipe worker thread, but the badge window has
+  // to be created and moved by the thread that owns it: a window created on a
+  // thread without a message pump never sees its WM_TIMER, so the badge would
+  // stay where it was first shown instead of following the cursor.
+  if (::GetWindowThreadProcessId(m_hWnd, nullptr) != ::GetCurrentThreadId()) {
+    ::PostMessage(m_hWnd, WM_APP_STATUS_TIP_SHOW, static_cast<WPARAM>(owner_pid),
+                  static_cast<LPARAM>(icon_kind));
+    return;
+  }
+  _ApplyStatusTip(icon_kind, owner_pid);
+}
+
+void WeaselPanel::_ApplyStatusTip(int icon_kind, DWORD owner_pid) {
   if (m_preview_mode || !m_style.ascii_tip_persistent)
     return;
   const int kind = icon_kind >= 0 ? icon_kind : _StatusTipKind();
@@ -596,6 +611,12 @@ void WeaselPanel::HideStatusTip() {
   if (!m_in_server) {
     if (m_tipCallback)
       m_tipCallback(false, STATUS_TIP_NONE);
+    return;
+  }
+  if (!m_hWnd)
+    return;
+  if (::GetWindowThreadProcessId(m_hWnd, nullptr) != ::GetCurrentThreadId()) {
+    ::PostMessage(m_hWnd, WM_APP_STATUS_TIP_HIDE, 0, 0);
     return;
   }
   if (m_statusTip)
@@ -1696,6 +1717,13 @@ LRESULT WeaselPanel::MsgHandler(HWND hwnd,
       return OnLeftClickUp(uMsg, wParam, lParam);
     case WM_LBUTTONDOWN:
       return OnLeftClickDown(uMsg, wParam, lParam);
+    case WM_APP_STATUS_TIP_SHOW:
+      _ApplyStatusTip(static_cast<int>(lParam), static_cast<DWORD>(wParam));
+      return 0;
+    case WM_APP_STATUS_TIP_HIDE:
+      if (m_statusTip)
+        m_statusTip->Hide();
+      return 0;
     case WM_DPICHANGED:
       if (lParam) {
         const auto* rc = reinterpret_cast<const RECT*>(lParam);

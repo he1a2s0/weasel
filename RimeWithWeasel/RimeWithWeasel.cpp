@@ -6,6 +6,7 @@
 #include <WeaselUtility.h>
 
 #include <filesystem>
+#include <cwchar>
 #include <map>
 #include <array>
 #include <vector>
@@ -50,10 +51,16 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
   m_pid = (m_pid << (31 - msbit));
   LOG(INFO) << "setting up Rime traits";
   _Setup();
+  // Installed here on purpose: the handler is constructed by the server on its
+  // message thread, which is where WINEVENT_OUTOFCONTEXT callbacks are delivered.
+  // Initialize() may also be reached from a pipe worker thread (EndMaintenance),
+  // and a hook installed there would never see a message loop again.
+  _WatchForeground(true);
   LOG(INFO) << "RimeWithWeaselHandler constructed";
 }
 
 RimeWithWeaselHandler::~RimeWithWeaselHandler() {
+  _WatchForeground(false);
   _ReleaseTipOwner();
   m_show_notifications.clear();
   m_session_status_map.clear();
@@ -440,6 +447,117 @@ void RimeWithWeaselHandler::HideTip(WeaselSessionId ipc_id) {
   }
   _ReleaseTipOwner();
   m_ui->HideTip();
+}
+
+RimeWithWeaselHandler* RimeWithWeaselHandler::s_foreground_watch = nullptr;
+
+void RimeWithWeaselHandler::_WatchForeground(bool enable) {
+  if (enable) {
+    if (m_foreground_hook)
+      return;
+    // WINEVENT_OUTOFCONTEXT delivers the callback to the thread that installs
+    // the hook, i.e. the server message thread, so the badge window is created
+    // and driven by the thread that owns the panel and pumps messages.
+    s_foreground_watch = this;
+    m_foreground_hook = ::SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
+        &RimeWithWeaselHandler::_ForegroundEventProc, 0, 0,
+        WINEVENT_OUTOFCONTEXT);
+    if (!m_foreground_hook) {
+      s_foreground_watch = nullptr;
+      LOG(ERROR) << "failed to install the foreground hook, error: "
+                 << ::GetLastError();
+    } else {
+      LOG(INFO) << "foreground hook installed";
+    }
+    return;
+  }
+  if (m_foreground_hook) {
+    ::UnhookWinEvent(m_foreground_hook);
+    m_foreground_hook = nullptr;
+    LOG(INFO) << "foreground hook removed";
+  }
+  if (s_foreground_watch == this)
+    s_foreground_watch = nullptr;
+}
+
+void CALLBACK RimeWithWeaselHandler::_ForegroundEventProc(HWINEVENTHOOK,
+                                                          DWORD,
+                                                          HWND hwnd,
+                                                          LONG,
+                                                          LONG,
+                                                          DWORD,
+                                                          DWORD) {
+  if (s_foreground_watch)
+    s_foreground_watch->_OnForegroundChanged(hwnd);
+}
+
+WeaselSessionId RimeWithWeaselHandler::_FindSessionByPid(DWORD pid) {
+  if (!pid)
+    return 0;
+  for (const auto& entry : m_session_status_map) {
+    if (entry.second.client_pid == pid)
+      return entry.first;
+  }
+  return 0;
+}
+
+// Shell surfaces share the process with explorer.exe, which may well own a
+// session of its own (address bar). Showing the badge over the Start menu or the
+// task view would be noise, so those windows are not treated as app foreground.
+static bool _IsShellSurface(HWND hwnd) {
+  wchar_t cls[64] = {0};
+  if (!::GetClassNameW(hwnd, cls, ARRAYSIZE(cls)))
+    return false;
+  static const wchar_t* kShellClasses[] = {
+      L"Shell_TrayWnd",  L"Shell_SecondaryTrayWnd", L"Progman",
+      L"WorkerW",        L"MultitaskingViewFrame",  L"ForegroundStaging",
+      L"XamlExplorerHostIslandWindow", L"Windows.UI.Core.CoreWindow"};
+  for (const auto* name : kShellClasses) {
+    if (!wcscmp(cls, name))
+      return true;
+  }
+  return false;
+}
+
+void RimeWithWeaselHandler::_OnForegroundChanged(HWND hwnd) {
+  if (m_disabled || !m_ui || !hwnd || _IsShellSurface(hwnd))
+    return;
+  DWORD pid = 0;
+  ::GetWindowThreadProcessId(hwnd, &pid);
+  // Hosts that never notify the text service on a click (Chromium activates it
+  // on the first keystroke only) leave the badge hidden until the user types.
+  // Window switches are the one signal we get for free here: state the session's
+  // wish again so the badge shows as soon as the app comes to the foreground.
+  // Everything inside one app stays with the client, which is the only side that
+  // knows whether the focused control accepts text.
+  // Several windows of one process can own a session each (one per UI thread);
+  // prefer the one that was last active so the badge reports the window the user
+  // was just typing in rather than an arbitrary sibling.
+  WeaselSessionId ipc_id =
+      (m_active_session && _SessionPid(m_active_session) == pid)
+          ? m_active_session
+          : _FindSessionByPid(pid);
+  if (!ipc_id)
+    return;
+  SessionStatus& session = get_session_status(ipc_id);
+  if (!session.style.ascii_tip_persistent)
+    return;
+  int kind = STATUS_TIP_ZH;
+  RIME_STRUCT(RimeStatus, status);
+  if (rime_api->get_status(session.session_id, &status)) {
+    if (status.is_disabled)
+      kind = STATUS_TIP_DISABLED;
+    else if (status.is_ascii_mode)
+      kind = STATUS_TIP_ASCII;
+    rime_api->free_status(&status);
+  }
+  DLOG(INFO) << "Foreground session: ipc_id = " << ipc_id << ", pid = " << pid
+             << ", kind = " << kind;
+  // the badge renders with the style of the session it reports; icons and the
+  // ascii_tip_persistent switch are per-session, not per-server
+  m_ui->style() = session.style;
+  ShowTip(kind, ipc_id);
 }
 
 void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,

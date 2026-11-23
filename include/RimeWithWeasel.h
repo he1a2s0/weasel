@@ -96,6 +96,18 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   void _ReleaseTipOwner();
   DWORD _SessionPid(WeaselSessionId ipc_id);
   bool _IsForegroundSession(WeaselSessionId ipc_id);
+  // 前台窗口兜底：部分宿主（Chromium 系）只在第一个按键才激活文字服务，
+  // 客户端不会为「点击」请求徽标。服务端自己盯前台变化，替该进程的会话显示。
+  void _WatchForeground(bool enable);
+  void _OnForegroundChanged(HWND hwnd);
+  WeaselSessionId _FindSessionByPid(DWORD pid);
+  static void CALLBACK _ForegroundEventProc(HWINEVENTHOOK hook,
+                                            DWORD event,
+                                            HWND hwnd,
+                                            LONG id_object,
+                                            LONG id_child,
+                                            DWORD thread_id,
+                                            DWORD time);
   // pid of the process owning the foreground window, 0 if unknown
   static DWORD _ForegroundPid();
   void _GetCandidateInfo(weasel::CandidateInfo& cinfo, RimeContext& ctx);
@@ -146,4 +158,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   // remember which session it belongs to: only that session may hide it, and
   // its process is watched so a crash cannot leave the badge on screen
   WeaselSessionId m_tip_owner = 0;
+  // foreground watcher: one process-wide handler, so the callback finds it here
+  static RimeWithWeaselHandler* s_foreground_watch;
+  HWINEVENTHOOK m_foreground_hook = nullptr;
 };
